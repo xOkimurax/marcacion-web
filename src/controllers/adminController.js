@@ -1,45 +1,36 @@
-import { prisma } from '../server.js';
+import pool, { toRow } from '../db.js';
 
-/**
- * Returns today's attendance records with user info, sorted by timestamp.
- */
 export async function getDashboardToday(req, res) {
   try {
-    const startOfToday = new Date();
-    startOfToday.setHours(0, 0, 0, 0);
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+    const todayEnd = new Date();
+    todayEnd.setHours(23, 59, 59, 999);
 
-    const endOfToday = new Date();
-    endOfToday.setHours(23, 59, 59, 999);
+    const { rows } = await pool.query(
+      `SELECT a.*, u.id as u_id, u.name as u_name, u.email as u_email, u.picture as u_picture, u.role as u_role
+       FROM attendances a JOIN users u ON a.user_id = u.id
+       WHERE a.timestamp >= $1 AND a.timestamp <= $2
+       ORDER BY a.timestamp ASC`,
+      [todayStart.toISOString(), todayEnd.toISOString()]
+    );
 
-    const attendances = await prisma.attendance.findMany({
-      where: {
-        timestamp: {
-          gte: startOfToday,
-          lte: endOfToday,
-        },
-      },
-      include: {
-        user: {
-          select: {
-            id: true,
-            name: true,
-            email: true,
-            picture: true,
-            role: true,
-          },
-        },
-      },
-      orderBy: { timestamp: 'asc' },
-    });
-
-    // Build a summary: for each user, get their first ENTRY and last EXIT of the day
     const userMap = new Map();
-    for (const record of attendances) {
-      const uid = record.userId;
+    for (const row of rows) {
+      const uid = row.user_id;
       if (!userMap.has(uid)) {
-        userMap.set(uid, { user: record.user, records: [] });
+        userMap.set(uid, {
+          user: { id: row.u_id, name: row.u_name, email: row.u_email, picture: row.u_picture, role: row.u_role },
+          records: [],
+        });
       }
-      userMap.get(uid).records.push(record);
+      const attendance = toRow(row);
+      delete attendance.uId;
+      delete attendance.uName;
+      delete attendance.uEmail;
+      delete attendance.uPicture;
+      delete attendance.uRole;
+      userMap.get(uid).records.push(attendance);
     }
 
     const summary = Array.from(userMap.values()).map(({ user, records }) => {
@@ -47,8 +38,8 @@ export async function getDashboardToday(req, res) {
       const exits = records.filter((r) => r.type === 'EXIT');
       return {
         user,
-        firstEntry: entries.length > 0 ? entries[0] : null,
-        lastExit: exits.length > 0 ? exits[exits.length - 1] : null,
+        firstEntry: entries[0] || null,
+        lastExit: exits[exits.length - 1] || null,
         totalRecords: records.length,
         records,
       };
@@ -57,287 +48,175 @@ export async function getDashboardToday(req, res) {
     return res.status(200).json({
       success: true,
       data: {
-        date: startOfToday.toISOString().split('T')[0],
-        totalAttendances: attendances.length,
+        date: todayStart.toISOString().split('T')[0],
+        totalAttendances: rows.length,
         employees: summary,
       },
     });
   } catch (error) {
     console.error('getDashboardToday error:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'An error occurred while fetching dashboard data.',
-    });
+    return res.status(500).json({ error: 'An error occurred while fetching dashboard data.' });
   }
 }
 
-/**
- * Returns all attendance records with filters and pagination.
- * Query params: userId, startDate, endDate, page, limit.
- */
 export async function getFullHistory(req, res) {
   try {
-    const {
-      userId,
-      startDate,
-      endDate,
-      page = '1',
-      limit = '20',
-    } = req.query;
+    const { userId, startDate, endDate, page = '1', limit = '20', date } = req.query;
 
     const pageNum = Math.max(1, parseInt(page, 10));
     const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10)));
-    const skip = (pageNum - 1) * limitNum;
+    const offset = (pageNum - 1) * limitNum;
 
-    const where = {};
+    const conditions = [];
+    const params = [];
+    let i = 1;
 
-    if (userId) {
-      where.userId = userId;
-    }
+    if (userId) { conditions.push(`a.user_id = $${i++}`); params.push(userId); }
 
-    if (startDate || endDate) {
-      where.timestamp = {};
+    if (date) {
+      const d = new Date(date);
+      const start = new Date(d); start.setHours(0, 0, 0, 0);
+      const end = new Date(d); end.setHours(23, 59, 59, 999);
+      conditions.push(`a.timestamp >= $${i++}`); params.push(start.toISOString());
+      conditions.push(`a.timestamp <= $${i++}`); params.push(end.toISOString());
+    } else {
       if (startDate) {
-        const start = new Date(startDate);
-        start.setHours(0, 0, 0, 0);
-        where.timestamp.gte = start;
+        const start = new Date(startDate); start.setHours(0, 0, 0, 0);
+        conditions.push(`a.timestamp >= $${i++}`); params.push(start.toISOString());
       }
       if (endDate) {
-        const end = new Date(endDate);
-        end.setHours(23, 59, 59, 999);
-        where.timestamp.lte = end;
+        const end = new Date(endDate); end.setHours(23, 59, 59, 999);
+        conditions.push(`a.timestamp <= $${i++}`); params.push(end.toISOString());
       }
     }
 
-    const [total, records] = await Promise.all([
-      prisma.attendance.count({ where }),
-      prisma.attendance.findMany({
-        where,
-        include: {
-          user: {
-            select: {
-              id: true,
-              name: true,
-              email: true,
-              picture: true,
-            },
-          },
-        },
-        orderBy: { timestamp: 'desc' },
-        skip,
-        take: limitNum,
-      }),
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+
+    const [countResult, records] = await Promise.all([
+      pool.query(
+        `SELECT COUNT(*) FROM attendances a JOIN users u ON a.user_id = u.id ${where}`,
+        params
+      ),
+      pool.query(
+        `SELECT a.*, u.id as u_id, u.name as u_name, u.email as u_email, u.picture as u_picture
+         FROM attendances a JOIN users u ON a.user_id = u.id
+         ${where} ORDER BY a.timestamp DESC LIMIT $${i} OFFSET $${i + 1}`,
+        [...params, limitNum, offset]
+      ),
     ]);
+
+    const total = parseInt(countResult.rows[0].count, 10);
+    const result = records.rows.map((row) => {
+      const att = toRow(row);
+      att.user = { id: att.uId, name: att.uName, email: att.uEmail, picture: att.uPicture };
+      delete att.uId; delete att.uName; delete att.uEmail; delete att.uPicture;
+      return att;
+    });
 
     return res.status(200).json({
       success: true,
       data: {
-        records,
-        pagination: {
-          total,
-          page: pageNum,
-          limit: limitNum,
-          totalPages: Math.ceil(total / limitNum),
-        },
+        records: result,
+        pagination: { total, page: pageNum, limit: limitNum, totalPages: Math.ceil(total / limitNum) },
       },
     });
   } catch (error) {
     console.error('getFullHistory error:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'An error occurred while fetching attendance history.',
-    });
+    return res.status(500).json({ error: 'An error occurred while fetching attendance history.' });
   }
 }
 
-/**
- * Returns all users with role EMPLOYEE.
- */
 export async function getEmployees(req, res) {
   try {
-    const employees = await prisma.user.findMany({
-      where: { role: 'EMPLOYEE' },
-      select: {
-        id: true,
-        email: true,
-        name: true,
-        picture: true,
-        isActive: true,
-        role: true,
-        createdAt: true,
-        updatedAt: true,
-      },
-      orderBy: { name: 'asc' },
-    });
-
-    return res.status(200).json({
-      success: true,
-      data: employees,
-    });
+    const { rows } = await pool.query(
+      'SELECT * FROM users ORDER BY name ASC'
+    );
+    return res.status(200).json({ success: true, data: rows.map(toRow) });
   } catch (error) {
     console.error('getEmployees error:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'An error occurred while fetching employees.',
-    });
+    return res.status(500).json({ error: 'An error occurred while fetching employees.' });
   }
 }
 
-/**
- * Creates a new User with role EMPLOYEE.
- * Body: { email, name, isActive }
- */
 export async function createEmployee(req, res) {
   try {
     const { email, name, isActive = true } = req.body;
 
     if (!email || !name) {
-      return res.status(400).json({
-        success: false,
-        message: 'Email and name are required.',
-      });
+      return res.status(400).json({ error: 'Email and name are required.' });
     }
 
-    // Check for existing user with the same email
-    const existingUser = await prisma.user.findUnique({ where: { email } });
-    if (existingUser) {
-      return res.status(409).json({
-        success: false,
-        message: 'A user with this email already exists.',
-      });
+    const existing = await pool.query('SELECT id FROM users WHERE email = $1', [email]);
+    if (existing.rows[0]) {
+      return res.status(409).json({ error: 'A user with this email already exists.' });
     }
 
-    const employee = await prisma.user.create({
-      data: {
-        email,
-        name,
-        isActive: Boolean(isActive),
-        role: 'EMPLOYEE',
-      },
-      select: {
-        id: true,
-        email: true,
-        name: true,
-        picture: true,
-        isActive: true,
-        role: true,
-        createdAt: true,
-        updatedAt: true,
-      },
-    });
+    const { rows } = await pool.query(
+      `INSERT INTO users (email, name, is_active, role)
+       VALUES ($1, $2, $3, 'EMPLOYEE') RETURNING *`,
+      [email, name, Boolean(isActive)]
+    );
 
-    return res.status(201).json({
-      success: true,
-      message: 'Employee created successfully.',
-      data: employee,
-    });
+    return res.status(201).json({ success: true, message: 'Employee created successfully.', data: toRow(rows[0]) });
   } catch (error) {
     console.error('createEmployee error:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'An error occurred while creating the employee.',
-    });
+    return res.status(500).json({ error: 'An error occurred while creating the employee.' });
   }
 }
 
-/**
- * Updates a user's isActive and/or name by id.
- * Body: { isActive?, name? }
- */
 export async function updateEmployee(req, res) {
   try {
     const { id } = req.params;
-    const { isActive, name } = req.body;
+    const { isActive, name, role } = req.body;
 
-    const existingUser = await prisma.user.findUnique({ where: { id } });
-    if (!existingUser) {
-      return res.status(404).json({
-        success: false,
-        message: 'Employee not found.',
-      });
+    const existing = await pool.query('SELECT id FROM users WHERE id = $1', [id]);
+    if (!existing.rows[0]) {
+      return res.status(404).json({ error: 'Employee not found.' });
     }
 
-    const updateData = {};
-    if (isActive !== undefined) updateData.isActive = Boolean(isActive);
-    if (name !== undefined) updateData.name = name;
+    const sets = [];
+    const params = [];
+    let i = 1;
 
-    if (Object.keys(updateData).length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'No valid fields provided for update.',
-      });
+    if (isActive !== undefined) { sets.push(`is_active = $${i++}`); params.push(Boolean(isActive)); }
+    if (name !== undefined) { sets.push(`name = $${i++}`); params.push(name); }
+    if (role !== undefined) { sets.push(`role = $${i++}`); params.push(role); }
+
+    if (sets.length === 0) {
+      return res.status(400).json({ error: 'No valid fields provided for update.' });
     }
 
-    const updatedUser = await prisma.user.update({
-      where: { id },
-      data: updateData,
-      select: {
-        id: true,
-        email: true,
-        name: true,
-        picture: true,
-        isActive: true,
-        role: true,
-        createdAt: true,
-        updatedAt: true,
-      },
-    });
+    sets.push(`updated_at = NOW()`);
+    params.push(id);
 
-    return res.status(200).json({
-      success: true,
-      message: 'Employee updated successfully.',
-      data: updatedUser,
-    });
+    const { rows } = await pool.query(
+      `UPDATE users SET ${sets.join(', ')} WHERE id = $${i} RETURNING *`,
+      params
+    );
+
+    return res.status(200).json({ success: true, message: 'Employee updated successfully.', data: toRow(rows[0]) });
   } catch (error) {
     console.error('updateEmployee error:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'An error occurred while updating the employee.',
-    });
+    return res.status(500).json({ error: 'An error occurred while updating the employee.' });
   }
 }
 
-/**
- * Returns the current LocationConfig (first record), or a default placeholder.
- */
 export async function getLocation(req, res) {
   try {
-    const config = await prisma.locationConfig.findFirst();
-
-    if (!config) {
-      return res.status(200).json({
-        success: true,
-        data: null,
-        message: 'No location configured yet.',
-      });
-    }
-
-    return res.status(200).json({
-      success: true,
-      data: config,
-    });
+    const { rows } = await pool.query('SELECT * FROM location_config LIMIT 1');
+    return res.status(200).json({ success: true, data: rows[0] ? toRow(rows[0]) : null });
   } catch (error) {
     console.error('getLocation error:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'An error occurred while fetching the location configuration.',
-    });
+    return res.status(500).json({ error: 'An error occurred while fetching location configuration.' });
   }
 }
 
-/**
- * Upserts the LocationConfig record.
- * Body: { name, latitude, longitude, radiusMeters }
- */
 export async function updateLocation(req, res) {
   try {
     const { name, latitude, longitude, radiusMeters } = req.body;
 
     if (!name || latitude === undefined || longitude === undefined) {
-      return res.status(400).json({
-        success: false,
-        message: 'Name, latitude, and longitude are required.',
-      });
+      return res.status(400).json({ error: 'Name, latitude, and longitude are required.' });
     }
 
     const lat = parseFloat(latitude);
@@ -345,203 +224,134 @@ export async function updateLocation(req, res) {
     const radius = radiusMeters !== undefined ? parseFloat(radiusMeters) : 100;
 
     if (isNaN(lat) || isNaN(lon) || isNaN(radius)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Latitude, longitude, and radiusMeters must be valid numbers.',
-      });
+      return res.status(400).json({ error: 'Latitude, longitude, and radiusMeters must be valid numbers.' });
     }
 
-    // Find the existing config to determine whether to create or update
-    const existing = await prisma.locationConfig.findFirst();
+    const existing = await pool.query('SELECT id FROM location_config LIMIT 1');
+    let rows;
 
-    let config;
-    if (existing) {
-      config = await prisma.locationConfig.update({
-        where: { id: existing.id },
-        data: { name, latitude: lat, longitude: lon, radiusMeters: radius },
-      });
+    if (existing.rows[0]) {
+      ({ rows } = await pool.query(
+        `UPDATE location_config SET name = $1, latitude = $2, longitude = $3, radius_meters = $4, updated_at = NOW()
+         WHERE id = $5 RETURNING *`,
+        [name, lat, lon, radius, existing.rows[0].id]
+      ));
     } else {
-      config = await prisma.locationConfig.create({
-        data: { name, latitude: lat, longitude: lon, radiusMeters: radius },
-      });
+      ({ rows } = await pool.query(
+        `INSERT INTO location_config (name, latitude, longitude, radius_meters)
+         VALUES ($1, $2, $3, $4) RETURNING *`,
+        [name, lat, lon, radius]
+      ));
     }
 
-    return res.status(200).json({
-      success: true,
-      message: 'Location configuration updated successfully.',
-      data: config,
-    });
+    return res.status(200).json({ success: true, message: 'Location configuration updated.', data: toRow(rows[0]) });
   } catch (error) {
     console.error('updateLocation error:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'An error occurred while updating the location configuration.',
-    });
+    return res.status(500).json({ error: 'An error occurred while updating location configuration.' });
   }
 }
 
-/**
- * Returns FailedAttempt records with user info.
- * Query params: userId, startDate, endDate, page, limit.
- */
 export async function getFailedAttempts(req, res) {
   try {
-    const {
-      userId,
-      startDate,
-      endDate,
-      page = '1',
-      limit = '20',
-    } = req.query;
+    const { userId, startDate, endDate, page = '1', limit = '20' } = req.query;
 
     const pageNum = Math.max(1, parseInt(page, 10));
     const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10)));
-    const skip = (pageNum - 1) * limitNum;
+    const offset = (pageNum - 1) * limitNum;
 
-    const where = {};
+    const conditions = [];
+    const params = [];
+    let i = 1;
 
-    if (userId) {
-      where.userId = userId;
+    if (userId) { conditions.push(`f.user_id = $${i++}`); params.push(userId); }
+    if (startDate) {
+      const start = new Date(startDate); start.setHours(0, 0, 0, 0);
+      conditions.push(`f.timestamp >= $${i++}`); params.push(start.toISOString());
+    }
+    if (endDate) {
+      const end = new Date(endDate); end.setHours(23, 59, 59, 999);
+      conditions.push(`f.timestamp <= $${i++}`); params.push(end.toISOString());
     }
 
-    if (startDate || endDate) {
-      where.timestamp = {};
-      if (startDate) {
-        const start = new Date(startDate);
-        start.setHours(0, 0, 0, 0);
-        where.timestamp.gte = start;
-      }
-      if (endDate) {
-        const end = new Date(endDate);
-        end.setHours(23, 59, 59, 999);
-        where.timestamp.lte = end;
-      }
-    }
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
 
-    const [total, records] = await Promise.all([
-      prisma.failedAttempt.count({ where }),
-      prisma.failedAttempt.findMany({
-        where,
-        include: {
-          user: {
-            select: {
-              id: true,
-              name: true,
-              email: true,
-              picture: true,
-            },
-          },
-        },
-        orderBy: { timestamp: 'desc' },
-        skip,
-        take: limitNum,
-      }),
+    const [countResult, records] = await Promise.all([
+      pool.query(`SELECT COUNT(*) FROM failed_attempts f ${where}`, params),
+      pool.query(
+        `SELECT f.*, u.id as u_id, u.name as u_name, u.email as u_email, u.picture as u_picture
+         FROM failed_attempts f LEFT JOIN users u ON f.user_id = u.id
+         ${where} ORDER BY f.timestamp DESC LIMIT $${i} OFFSET $${i + 1}`,
+        [...params, limitNum, offset]
+      ),
     ]);
+
+    const total = parseInt(countResult.rows[0].count, 10);
+    const result = records.rows.map((row) => {
+      const fa = toRow(row);
+      fa.user = fa.uId ? { id: fa.uId, name: fa.uName, email: fa.uEmail, picture: fa.uPicture } : null;
+      delete fa.uId; delete fa.uName; delete fa.uEmail; delete fa.uPicture;
+      return fa;
+    });
 
     return res.status(200).json({
       success: true,
       data: {
-        records,
-        pagination: {
-          total,
-          page: pageNum,
-          limit: limitNum,
-          totalPages: Math.ceil(total / limitNum),
-        },
+        records: result,
+        pagination: { total, page: pageNum, limit: limitNum, totalPages: Math.ceil(total / limitNum) },
       },
     });
   } catch (error) {
     console.error('getFailedAttempts error:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'An error occurred while fetching failed attempts.',
-    });
+    return res.status(500).json({ error: 'An error occurred while fetching failed attempts.' });
   }
 }
 
-/**
- * Exports attendance data as a CSV file.
- * Query params: startDate, endDate, userId.
- * Sets Content-Type to text/csv.
- */
 export async function exportReport(req, res) {
   try {
     const { startDate, endDate, userId } = req.query;
 
-    const where = {};
+    const conditions = [];
+    const params = [];
+    let i = 1;
 
-    if (userId) {
-      where.userId = userId;
+    if (userId) { conditions.push(`a.user_id = $${i++}`); params.push(userId); }
+    if (startDate) {
+      const start = new Date(startDate); start.setHours(0, 0, 0, 0);
+      conditions.push(`a.timestamp >= $${i++}`); params.push(start.toISOString());
+    }
+    if (endDate) {
+      const end = new Date(endDate); end.setHours(23, 59, 59, 999);
+      conditions.push(`a.timestamp <= $${i++}`); params.push(end.toISOString());
     }
 
-    if (startDate || endDate) {
-      where.timestamp = {};
-      if (startDate) {
-        const start = new Date(startDate);
-        start.setHours(0, 0, 0, 0);
-        where.timestamp.gte = start;
-      }
-      if (endDate) {
-        const end = new Date(endDate);
-        end.setHours(23, 59, 59, 999);
-        where.timestamp.lte = end;
-      }
-    }
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
 
-    const records = await prisma.attendance.findMany({
-      where,
-      include: {
-        user: {
-          select: {
-            id: true,
-            name: true,
-            email: true,
-          },
-        },
-      },
-      orderBy: { timestamp: 'asc' },
-    });
+    const { rows } = await pool.query(
+      `SELECT a.*, u.name as u_name, u.email as u_email
+       FROM attendances a JOIN users u ON a.user_id = u.id
+       ${where} ORDER BY a.timestamp ASC`,
+      params
+    );
 
-    // Build CSV content
-    const csvHeader = 'ID,User ID,User Name,User Email,Type,Latitude,Longitude,Timestamp,Is Valid,Notes\n';
+    const esc = (v) => {
+      if (v === null || v === undefined) return '';
+      const s = String(v);
+      return s.includes(',') || s.includes('"') || s.includes('\n') ? `"${s.replace(/"/g, '""')}"` : s;
+    };
 
-    const csvRows = records.map((record) => {
-      const escapeCsv = (value) => {
-        if (value === null || value === undefined) return '';
-        const str = String(value);
-        if (str.includes(',') || str.includes('"') || str.includes('\n')) {
-          return `"${str.replace(/"/g, '""')}"`;
-        }
-        return str;
-      };
-
-      return [
-        escapeCsv(record.id),
-        escapeCsv(record.userId),
-        escapeCsv(record.user?.name),
-        escapeCsv(record.user?.email),
-        escapeCsv(record.type),
-        escapeCsv(record.latitude),
-        escapeCsv(record.longitude),
-        escapeCsv(record.timestamp.toISOString()),
-        escapeCsv(record.isValid),
-        escapeCsv(record.notes),
-      ].join(',');
-    });
-
-    const csvContent = csvHeader + csvRows.join('\n');
+    const header = 'ID,User ID,User Name,User Email,Type,Latitude,Longitude,Timestamp,Is Valid,Notes\n';
+    const csvRows = rows.map((r) => [
+      esc(r.id), esc(r.user_id), esc(r.u_name), esc(r.u_email),
+      esc(r.type), esc(r.latitude), esc(r.longitude),
+      esc(new Date(r.timestamp).toISOString()), esc(r.is_valid), esc(r.notes),
+    ].join(','));
 
     const filename = `attendance-report-${new Date().toISOString().split('T')[0]}.csv`;
-
     res.setHeader('Content-Type', 'text/csv');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-
-    return res.status(200).send(csvContent);
+    return res.status(200).send(header + csvRows.join('\n'));
   } catch (error) {
     console.error('exportReport error:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'An error occurred while generating the report.',
-    });
+    return res.status(500).json({ error: 'An error occurred while generating the report.' });
   }
 }
