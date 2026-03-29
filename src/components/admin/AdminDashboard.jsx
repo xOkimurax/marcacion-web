@@ -4,6 +4,7 @@ import { useAuth } from '../../context/AuthContext'
 import { getDashboard } from '../../utils/api'
 
 const NAV_ITEMS = [
+  { label: 'Mi asistencia', path: '/employee', icon: 'attendance' },
   { label: 'Empleados', path: '/admin/employees', icon: 'users' },
   { label: 'Historial', path: '/admin/export', icon: 'history' },
   { label: 'Configuración', path: '/admin/location', icon: 'settings' },
@@ -13,6 +14,11 @@ const NAV_ITEMS = [
 
 function NavIcon({ name }) {
   const icons = {
+    attendance: (
+      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2m-6 9l2 2 4-4" />
+      </svg>
+    ),
     users: (
       <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
@@ -44,7 +50,7 @@ function NavIcon({ name }) {
 }
 
 export default function AdminDashboard() {
-  const { adminUser, logoutAdmin } = useAuth()
+  const { user, logout } = useAuth()
   const navigate = useNavigate()
   const [dashboard, setDashboard] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -71,8 +77,8 @@ export default function AdminDashboard() {
   }, [fetchDashboard])
 
   const handleLogout = () => {
-    logoutAdmin()
-    navigate('/admin/login', { replace: true })
+    logout()
+    navigate('/login', { replace: true })
   }
 
   const formatTime = (dateStr) => {
@@ -91,7 +97,7 @@ export default function AdminDashboard() {
         <div className="max-w-3xl mx-auto px-4 py-3 flex items-center justify-between">
           <div>
             <h1 className="text-base font-semibold text-gray-900">Panel Administrativo</h1>
-            <p className="text-xs text-gray-500">{adminUser?.username || adminUser?.name || 'Administrador'}</p>
+            <p className="text-xs text-gray-500">{user?.name || user?.email || 'Administrador'}</p>
           </div>
           <div className="flex items-center gap-2">
             <button

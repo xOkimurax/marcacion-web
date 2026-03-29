@@ -10,12 +10,7 @@ const api = axios.create({
 // Request interceptor: attach Bearer token
 api.interceptors.request.use(
   (config) => {
-    // Check for admin token first if the request is to admin routes
-    const isAdminRoute = config.url && config.url.startsWith('/admin')
-    const token = isAdminRoute
-      ? localStorage.getItem('adminToken') || localStorage.getItem('token')
-      : localStorage.getItem('token') || localStorage.getItem('adminToken')
-
+    const token = localStorage.getItem('token')
     if (token) {
       config.headers.Authorization = `Bearer ${token}`
     }
@@ -30,11 +25,8 @@ api.interceptors.response.use(
   (error) => {
     if (error.response && error.response.status === 401) {
       localStorage.removeItem('token')
-      localStorage.removeItem('adminToken')
       localStorage.removeItem('user')
-      localStorage.removeItem('adminUser')
-      // Redirect to home
-      window.location.href = '/'
+      window.location.href = '/login'
     }
     return Promise.reject(error)
   }
@@ -42,16 +34,10 @@ api.interceptors.response.use(
 
 // Auth
 export const loginWithGoogle = (credential) =>
-  api.post('/auth', { credential })
-
-export const loginAdmin = (username, password) =>
-  api.post('/auth/admin/login', { username, password })
+  api.post('/auth/google', { credential })
 
 export const getMe = () =>
   api.get('/auth/me')
-
-export const getAdminMe = () =>
-  api.get('/auth/admin/me')
 
 // Attendance
 export const markAttendance = (latitude, longitude) =>

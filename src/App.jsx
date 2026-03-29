@@ -2,13 +2,14 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { GoogleOAuthProvider } from '@react-oauth/google'
 import { AuthProvider, useAuth } from './context/AuthContext'
 
+// Auth
+import Login from './components/auth/Login'
+
 // Employee components
-import EmployeeLogin from './components/employee/EmployeeLogin'
 import EmployeeDashboard from './components/employee/EmployeeDashboard'
 import EmployeeHistory from './components/employee/EmployeeHistory'
 
 // Admin components
-import AdminLogin from './components/admin/AdminLogin'
 import AdminDashboard from './components/admin/AdminDashboard'
 import EmployeeManagement from './components/admin/EmployeeManagement'
 import LocationConfig from './components/admin/LocationConfig'
@@ -17,130 +18,113 @@ import FailedAttempts from './components/admin/FailedAttempts'
 
 const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || ''
 
-// Protected route for employees
-function ProtectedEmployeeRoute({ children }) {
+const Spinner = () => (
+  <div className="min-h-screen flex items-center justify-center bg-gray-50">
+    <div className="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
+  </div>
+)
+
+// Redirect unauthenticated users to /login
+function ProtectedRoute({ children }) {
   const { user, loading } = useAuth()
-
-  if (loading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-50">
-        <div className="flex flex-col items-center gap-3">
-          <div className="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
-          <p className="text-sm text-gray-500">Cargando...</p>
-        </div>
-      </div>
-    )
-  }
-
-  if (!user) {
-    return <Navigate to="/employee/login" replace />
-  }
-
+  if (loading) return <Spinner />
+  if (!user) return <Navigate to="/login" replace />
   return children
 }
 
-// Protected route for admins
-function ProtectedAdminRoute({ children }) {
-  const { adminUser, loading } = useAuth()
-
-  if (loading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-900">
-        <div className="flex flex-col items-center gap-3">
-          <div className="w-8 h-8 border-2 border-blue-400 border-t-transparent rounded-full animate-spin" />
-          <p className="text-sm text-gray-400">Cargando...</p>
-        </div>
-      </div>
-    )
-  }
-
-  if (!adminUser) {
-    return <Navigate to="/admin/login" replace />
-  }
-
+// Redirect non-admins away from admin routes
+function AdminRoute({ children }) {
+  const { user, loading } = useAuth()
+  if (loading) return <Spinner />
+  if (!user) return <Navigate to="/login" replace />
+  if (user.role !== 'ADMIN') return <Navigate to="/employee" replace />
   return children
 }
 
-// Root redirect
+// Root: redirect based on auth state and role
 function RootRedirect() {
   const { user, loading } = useAuth()
-
-  if (loading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-50">
-        <div className="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
-      </div>
-    )
-  }
-
-  return <Navigate to={user ? '/employee' : '/employee/login'} replace />
+  if (loading) return <Spinner />
+  if (!user) return <Navigate to="/login" replace />
+  if (user.role === 'ADMIN') return <Navigate to="/admin" replace />
+  return <Navigate to="/employee" replace />
 }
 
 function AppRoutes() {
+  const { user } = useAuth()
+
   return (
     <Routes>
       {/* Root */}
       <Route path="/" element={<RootRedirect />} />
 
-      {/* Employee routes */}
-      <Route path="/employee/login" element={<EmployeeLogin />} />
+      {/* Login — redirect authenticated users to their panel */}
+      <Route
+        path="/login"
+        element={
+          user
+            ? <Navigate to={user.role === 'ADMIN' ? '/admin' : '/employee'} replace />
+            : <Login />
+        }
+      />
+
+      {/* Employee routes — accessible by any authenticated user (EMPLOYEE or ADMIN) */}
       <Route
         path="/employee"
         element={
-          <ProtectedEmployeeRoute>
+          <ProtectedRoute>
             <EmployeeDashboard />
-          </ProtectedEmployeeRoute>
+          </ProtectedRoute>
         }
       />
       <Route
         path="/employee/history"
         element={
-          <ProtectedEmployeeRoute>
+          <ProtectedRoute>
             <EmployeeHistory />
-          </ProtectedEmployeeRoute>
+          </ProtectedRoute>
         }
       />
 
-      {/* Admin routes */}
-      <Route path="/admin/login" element={<AdminLogin />} />
+      {/* Admin routes — ADMIN only */}
       <Route
         path="/admin"
         element={
-          <ProtectedAdminRoute>
+          <AdminRoute>
             <AdminDashboard />
-          </ProtectedAdminRoute>
+          </AdminRoute>
         }
       />
       <Route
         path="/admin/employees"
         element={
-          <ProtectedAdminRoute>
+          <AdminRoute>
             <EmployeeManagement />
-          </ProtectedAdminRoute>
+          </AdminRoute>
         }
       />
       <Route
         path="/admin/location"
         element={
-          <ProtectedAdminRoute>
+          <AdminRoute>
             <LocationConfig />
-          </ProtectedAdminRoute>
+          </AdminRoute>
         }
       />
       <Route
         path="/admin/failed-attempts"
         element={
-          <ProtectedAdminRoute>
+          <AdminRoute>
             <FailedAttempts />
-          </ProtectedAdminRoute>
+          </AdminRoute>
         }
       />
       <Route
         path="/admin/export"
         element={
-          <ProtectedAdminRoute>
+          <AdminRoute>
             <ReportExport />
-          </ProtectedAdminRoute>
+          </AdminRoute>
         }
       />
 
