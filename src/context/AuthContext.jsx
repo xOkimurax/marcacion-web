@@ -1,5 +1,5 @@
 import { createContext, useContext, useState, useEffect, useCallback } from 'react'
-import { loginWithGoogle as apiLoginWithGoogle, getMe } from '../utils/api'
+import { getOAuthUrl, verifyToken, getMe } from '../utils/api'
 
 const AuthContext = createContext(null)
 
@@ -7,33 +7,34 @@ export function AuthProvider({ children }) {
   const [user, setUser] = useState(null)
   const [loading, setLoading] = useState(true)
 
-  // On mount: validate stored token
   useEffect(() => {
     const init = async () => {
       setLoading(true)
       const token = localStorage.getItem('token')
-
       if (token) {
         try {
           const res = await getMe()
-          const userData = res.data.user || res.data
-          setUser(userData)
-          localStorage.setItem('user', JSON.stringify(userData))
+          setUser(res.data.user || res.data)
         } catch {
           localStorage.removeItem('token')
           localStorage.removeItem('user')
           setUser(null)
         }
       }
-
       setLoading(false)
     }
-
     init()
   }, [])
 
-  const login = useCallback(async (googleCredential) => {
-    const res = await apiLoginWithGoogle(googleCredential)
+  // Redirige al usuario a InsForge OAuth
+  const startOAuth = useCallback(async () => {
+    const res = await getOAuthUrl()
+    window.location.href = res.data.url
+  }, [])
+
+  // Llamado desde /auth/callback con el token de InsForge
+  const loginWithToken = useCallback(async (insforgeToken) => {
+    const res = await verifyToken(insforgeToken)
     const { token, user: userData } = res.data
     localStorage.setItem('token', token)
     localStorage.setItem('user', JSON.stringify(userData))
@@ -47,20 +48,15 @@ export function AuthProvider({ children }) {
     setUser(null)
   }, [])
 
-  const value = {
-    user,
-    loading,
-    login,
-    logout,
-  }
-
-  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
+  return (
+    <AuthContext.Provider value={{ user, loading, startOAuth, loginWithToken, logout }}>
+      {children}
+    </AuthContext.Provider>
+  )
 }
 
 export function useAuth() {
   const context = useContext(AuthContext)
-  if (!context) {
-    throw new Error('useAuth must be used within an AuthProvider')
-  }
+  if (!context) throw new Error('useAuth must be used within an AuthProvider')
   return context
 }
