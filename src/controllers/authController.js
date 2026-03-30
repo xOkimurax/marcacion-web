@@ -1,62 +1,64 @@
-import { OAuth2Client } from 'google-auth-library';
+import fetch from 'node-fetch';
 import pool, { toRow } from '../db.js';
 import { signToken } from '../utils/jwt.js';
 
-const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+const INSFORGE_URL = process.env.INSFORGE_URL || 'https://9bc8pwrr.us-east.insforge.app';
+const INSFORGE_API_KEY = process.env.INSFORGE_API_KEY || 'ik_6fff462b006815d5836170080d3122c3';
 
-export async function googleLogin(req, res) {
+// GET /api/auth/oauth/google/url — devuelve la URL de OAuth de InsForge
+export async function getGoogleOAuthUrl(req, res) {
   try {
-    const { googleToken, credential } = req.body;
-    const idToken = googleToken || credential;
+    const redirectUri = process.env.FRONTEND_URL + '/auth/callback';
+    const codeChallenge = Buffer.from(Math.random().toString()).toString('base64url');
+    const state = Buffer.from(JSON.stringify({ redirectUri, ts: Date.now() })).toString('base64url');
 
-    if (!idToken) {
-      return res.status(400).json({ error: 'googleToken is required.' });
-    }
+    const url = `${INSFORGE_URL}/api/auth/oauth/google?redirect_uri=${encodeURIComponent(redirectUri)}&code_challenge=${codeChallenge}&state=${state}`;
+    return res.json({ url });
+  } catch (error) {
+    console.error('getGoogleOAuthUrl error:', error);
+    return res.status(500).json({ error: 'Error generating OAuth URL.' });
+  }
+}
 
-    const ticket = await googleClient.verifyIdToken({
-      idToken,
-      audience: process.env.GOOGLE_CLIENT_ID,
+// POST /api/auth/verify — verifica token de InsForge, retorna JWT propio con rol
+export async function verifyInsforgeToken(req, res) {
+  try {
+    const { token } = req.body;
+    if (!token) return res.status(400).json({ error: 'token is required.' });
+
+    // Verificar token con InsForge
+    const meRes = await fetch(`${INSFORGE_URL}/api/auth/me`, {
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'x-api-key': INSFORGE_API_KEY,
+      },
     });
 
-    const payload = ticket.getPayload();
-    if (!payload) {
-      return res.status(401).json({ error: 'Invalid Google token.' });
+    if (!meRes.ok) {
+      return res.status(401).json({ error: 'Invalid InsForge token.' });
     }
 
-    const { sub: googleId, email, name, picture } = payload;
+    const meData = await meRes.json();
+    const { id: insforgeId, email, name, avatarUrl: picture } = meData.user || meData;
 
-    if (!email) {
-      return res.status(400).json({ error: 'Email not available from Google account.' });
-    }
+    if (!email) return res.status(400).json({ error: 'Email not available.' });
 
-    // Find by google_id or email, then upsert
-    let { rows } = await pool.query('SELECT * FROM users WHERE google_id = $1', [googleId]);
+    // Buscar o crear usuario en nuestra DB con rol
+    let { rows } = await pool.query('SELECT * FROM users WHERE insforge_id = $1 OR email = $2', [insforgeId, email]);
     let user = rows[0];
 
     if (!user) {
-      const byEmail = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
-      if (byEmail.rows[0]) {
-        // Link existing user
-        const updated = await pool.query(
-          `UPDATE users SET google_id = $1, name = $2, picture = $3, updated_at = NOW()
-           WHERE email = $4 RETURNING *`,
-          [googleId, name || byEmail.rows[0].name, picture || byEmail.rows[0].picture, email]
-        );
-        user = updated.rows[0];
-      } else {
-        // Create new user
-        const created = await pool.query(
-          `INSERT INTO users (google_id, email, name, picture, role, is_active)
-           VALUES ($1, $2, $3, $4, 'EMPLOYEE', true) RETURNING *`,
-          [googleId, email, name || email, picture]
-        );
-        user = created.rows[0];
-      }
+      const created = await pool.query(
+        `INSERT INTO users (insforge_id, email, name, picture, role, is_active)
+         VALUES ($1, $2, $3, $4, 'EMPLOYEE', true) RETURNING *`,
+        [insforgeId, email, name || email, picture]
+      );
+      user = created.rows[0];
     } else {
       const updated = await pool.query(
-        `UPDATE users SET name = $1, picture = $2, updated_at = NOW()
-         WHERE google_id = $3 RETURNING *`,
-        [name || user.name, picture || user.picture, googleId]
+        `UPDATE users SET insforge_id = $1, name = $2, picture = $3, updated_at = NOW()
+         WHERE id = $4 RETURNING *`,
+        [insforgeId, name || user.name, picture || user.picture, user.id]
       );
       user = updated.rows[0];
     }
@@ -66,17 +68,24 @@ export async function googleLogin(req, res) {
     }
 
     const u = toRow(user);
-    const token = signToken({ userId: u.id, email: u.email, name: u.name, role: u.role });
+    const jwtToken = signToken({ userId: u.id, email: u.email, name: u.name, role: u.role });
 
     return res.status(200).json({
       success: true,
-      token,
+      token: jwtToken,
       user: { id: u.id, email: u.email, name: u.name, picture: u.picture, role: u.role, isActive: u.isActive },
     });
   } catch (error) {
-    console.error('googleLogin error:', error);
-    return res.status(500).json({ error: 'An error occurred during Google login.' });
+    console.error('verifyInsforgeToken error:', error);
+    return res.status(500).json({ error: 'An error occurred during authentication.' });
   }
+}
+
+// POST /api/auth/google — compatibilidad hacia atrás (acepta token de InsForge también)
+export async function googleLogin(req, res) {
+  const { token, insforgeToken } = req.body;
+  req.body.token = token || insforgeToken;
+  return verifyInsforgeToken(req, res);
 }
 
 export async function getMe(req, res) {
