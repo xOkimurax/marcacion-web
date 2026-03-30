@@ -9,10 +9,13 @@ const INSFORGE_API_KEY = process.env.INSFORGE_API_KEY || 'ik_6fff462b006815d5836
 export async function getGoogleOAuthUrl(req, res) {
   try {
     const redirectUri = process.env.FRONTEND_URL + '/auth/callback';
-    const codeChallenge = Buffer.from(Math.random().toString()).toString('base64url');
-    const state = Buffer.from(JSON.stringify({ redirectUri, ts: Date.now() })).toString('base64url');
+    // PKCE: code_verifier de 64 chars random, code_challenge = base64url(sha256(verifier))
+    const crypto = await import('crypto');
+    const codeVerifier = crypto.randomBytes(48).toString('base64url'); // 64 chars
+    const codeChallenge = crypto.createHash('sha256').update(codeVerifier).digest('base64url');
+    const state = Buffer.from(JSON.stringify({ codeVerifier, ts: Date.now() })).toString('base64url');
 
-    const url = `${INSFORGE_URL}/api/auth/oauth/google?redirect_uri=${encodeURIComponent(redirectUri)}&code_challenge=${codeChallenge}&state=${state}`;
+    const url = `${INSFORGE_URL}/api/auth/oauth/google?redirect_uri=${encodeURIComponent(redirectUri)}&code_challenge=${codeChallenge}&code_challenge_method=S256&state=${state}`;
     return res.json({ url });
   } catch (error) {
     console.error('getGoogleOAuthUrl error:', error);
