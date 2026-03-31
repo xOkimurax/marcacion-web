@@ -5,18 +5,34 @@ import { signToken } from '../utils/jwt.js';
 const INSFORGE_URL = process.env.INSFORGE_URL || 'https://9bc8pwrr.us-east.insforge.app';
 const INSFORGE_API_KEY = process.env.INSFORGE_API_KEY || 'ik_6fff462b006815d5836170080d3122c3';
 
-// GET /api/auth/oauth/google/url — devuelve la URL de OAuth de InsForge
+// GET /api/auth/oauth/google/url — llama a InsForge y devuelve la URL final de Google OAuth
 export async function getGoogleOAuthUrl(req, res) {
   try {
     const redirectUri = process.env.FRONTEND_URL + '/auth/callback';
-    // PKCE: code_verifier de 64 chars random, code_challenge = base64url(sha256(verifier))
     const crypto = await import('crypto');
-    const codeVerifier = crypto.randomBytes(48).toString('base64url'); // 64 chars
+    const codeVerifier = crypto.randomBytes(48).toString('base64url');
     const codeChallenge = crypto.createHash('sha256').update(codeVerifier).digest('base64url');
     const state = Buffer.from(JSON.stringify({ codeVerifier, ts: Date.now() })).toString('base64url');
 
-    const url = `${INSFORGE_URL}/api/auth/oauth/google?redirect_uri=${encodeURIComponent(redirectUri)}&code_challenge=${codeChallenge}&code_challenge_method=S256&state=${state}`;
-    return res.json({ url });
+    const insforgeUrl = `${INSFORGE_URL}/api/auth/oauth/google?redirect_uri=${encodeURIComponent(redirectUri)}&code_challenge=${codeChallenge}&code_challenge_method=S256&state=${state}`;
+
+    // Llamar a InsForge para obtener la authUrl final de Google
+    const insforgeRes = await fetch(insforgeUrl, {
+      headers: { 'x-api-key': INSFORGE_API_KEY },
+    });
+
+    if (!insforgeRes.ok) {
+      throw new Error(`InsForge responded with ${insforgeRes.status}`);
+    }
+
+    const data = await insforgeRes.json();
+    const finalUrl = data.authUrl || data.url;
+
+    if (!finalUrl) {
+      throw new Error('InsForge did not return an auth URL');
+    }
+
+    return res.json({ url: finalUrl });
   } catch (error) {
     console.error('getGoogleOAuthUrl error:', error);
     return res.status(500).json({ error: 'Error generating OAuth URL.' });
@@ -29,7 +45,6 @@ export async function verifyInsforgeToken(req, res) {
     const { token } = req.body;
     if (!token) return res.status(400).json({ error: 'token is required.' });
 
-    // Verificar token con InsForge
     const meRes = await fetch(`${INSFORGE_URL}/api/auth/me`, {
       headers: {
         'Authorization': `Bearer ${token}`,
@@ -46,7 +61,6 @@ export async function verifyInsforgeToken(req, res) {
 
     if (!email) return res.status(400).json({ error: 'Email not available.' });
 
-    // Buscar o crear usuario en nuestra DB con rol
     let { rows } = await pool.query('SELECT * FROM users WHERE insforge_id = $1 OR email = $2', [insforgeId, email]);
     let user = rows[0];
 
@@ -84,7 +98,6 @@ export async function verifyInsforgeToken(req, res) {
   }
 }
 
-// POST /api/auth/google — compatibilidad hacia atrás (acepta token de InsForge también)
 export async function googleLogin(req, res) {
   const { token, insforgeToken } = req.body;
   req.body.token = token || insforgeToken;
