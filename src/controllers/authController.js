@@ -115,3 +115,51 @@ export async function getMe(req, res) {
     return res.status(500).json({ error: 'An error occurred while fetching user info.' });
   }
 }
+
+// POST /api/auth/exchange — intercambia el code de InsForge por token propio
+export async function exchangeCode(req, res) {
+  try {
+    const { code, state } = req.body;
+    if (!code) return res.status(400).json({ error: 'code is required.' });
+
+    // Extraer codeVerifier del state (base64url JSON con { codeVerifier, ts })
+    let codeVerifier = null;
+    if (state) {
+      try {
+        const decoded = JSON.parse(Buffer.from(state, 'base64url').toString());
+        codeVerifier = decoded.codeVerifier;
+      } catch {}
+    }
+
+    // Intentar exchange con InsForge
+    const exchangeRes = await fetch(`${INSFORGE_URL}/api/auth/oauth/exchange`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': INSFORGE_API_KEY,
+      },
+      body: JSON.stringify({ code, code_verifier: codeVerifier }),
+    });
+
+    if (!exchangeRes.ok) {
+      const errData = await exchangeRes.json().catch(() => ({}));
+      console.error('InsForge exchange error:', errData);
+      return res.status(401).json({ error: 'Failed to exchange code.', detail: errData });
+    }
+
+    const exchangeData = await exchangeRes.json();
+    // InsForge devuelve access_token o token
+    const insforgeToken = exchangeData.access_token || exchangeData.token;
+
+    if (!insforgeToken) {
+      return res.status(401).json({ error: 'No token in exchange response.', detail: exchangeData });
+    }
+
+    // Reusar verifyInsforgeToken para crear usuario y JWT propio
+    req.body.token = insforgeToken;
+    return verifyInsforgeToken(req, res);
+  } catch (error) {
+    console.error('exchangeCode error:', error);
+    return res.status(500).json({ error: 'Error exchanging code.' });
+  }
+}
