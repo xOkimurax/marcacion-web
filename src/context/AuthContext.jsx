@@ -29,7 +29,7 @@ export function AuthProvider({ children }) {
   // Redirige al usuario a InsForge OAuth
   const startOAuth = useCallback(async () => {
     const res = await getOAuthUrl()
-    window.location.href = res.data.url
+    window.location.href = res.data.authUrl || res.data.url
   }, [])
 
   // Llamado desde /auth/callback con el token de InsForge
