@@ -77,3 +77,7 @@ export const exportReport = (params) =>
   api.get('/admin/reports', { params, responseType: 'blob' })
 
 export default api
+
+// Exchange InsForge code for token
+export const exchangeCode = (code, state) =>
+  api.post('/auth/exchange', { code, state })

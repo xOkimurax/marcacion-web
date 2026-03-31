@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../../context/AuthContext'
+import { exchangeCode } from '../../utils/api'
 
 export default function Callback() {
   const { loginWithToken } = useAuth()
@@ -9,35 +10,34 @@ export default function Callback() {
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
-    const hashParams = new URLSearchParams(window.location.hash.replace('#', ''))
-    
-    // InsForge puede mandar el token con distintos nombres
-    const token = 
-      params.get('token') ||
-      params.get('access_token') ||
-      params.get('insforge_token') ||
-      hashParams.get('token') ||
-      hashParams.get('access_token')
 
-    // Si no hay token, mostrar todos los params para debug
-    if (!token) {
-      const allParams = [...params.entries()].map(([k,v]) => `${k}=${v.slice(0,20)}...`).join(', ')
-      const allHash = [...hashParams.entries()].map(([k,v]) => `${k}=${v.slice(0,20)}...`).join(', ')
-      setError(`Params: [${allParams || 'ninguno'}] Hash: [${allHash || 'ninguno'}]`)
-      return
+    // InsForge redirige con ?code=... o directamente con ?token=...
+    const code = params.get('code')
+    const token = params.get('token') || params.get('access_token')
+    const state = params.get('state')
+
+    const handleLogin = async (insforgeToken) => {
+      const userData = await loginWithToken(insforgeToken)
+      if (userData.role === 'ADMIN') {
+        navigate('/admin', { replace: true })
+      } else {
+        navigate('/employee', { replace: true })
+      }
     }
 
-    loginWithToken(token)
-      .then((userData) => {
-        if (userData.role === 'ADMIN') {
-          navigate('/admin')
-        } else {
-          navigate('/employee')
-        }
-      })
-      .catch((err) => {
-        setError('Error al verificar la sesión. Intenta de nuevo.')
-      })
+    if (token) {
+      // InsForge mandó el token directo
+      handleLogin(token).catch(() => setError('Error al verificar la sesión.'))
+    } else if (code) {
+      // InsForge mandó un code — intercambiarlo en el backend
+      exchangeCode(code, state)
+        .then(res => handleLogin(res.data.token))
+        .catch(() => setError('Error al intercambiar el código de autenticación.'))
+    } else {
+      // Debug: mostrar todos los params
+      const allParams = [...params.entries()].map(([k,v]) => `${k}=${v.slice(0,30)}`).join(' | ')
+      setError(`Sin token ni code. Params: [${allParams || 'ninguno'}]`)
+    }
   }, [loginWithToken, navigate])
 
   if (error) {
