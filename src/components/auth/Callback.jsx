@@ -9,10 +9,21 @@ export default function Callback() {
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
-    const token = params.get('token') || params.get('access_token')
+    const hashParams = new URLSearchParams(window.location.hash.replace('#', ''))
+    
+    // InsForge puede mandar el token con distintos nombres
+    const token = 
+      params.get('token') ||
+      params.get('access_token') ||
+      params.get('insforge_token') ||
+      hashParams.get('token') ||
+      hashParams.get('access_token')
 
+    // Si no hay token, mostrar todos los params para debug
     if (!token) {
-      setError('No se recibió token de autenticación.')
+      const allParams = [...params.entries()].map(([k,v]) => `${k}=${v.slice(0,20)}...`).join(', ')
+      const allHash = [...hashParams.entries()].map(([k,v]) => `${k}=${v.slice(0,20)}...`).join(', ')
+      setError(`Params: [${allParams || 'ninguno'}] Hash: [${allHash || 'ninguno'}]`)
       return
     }
 
@@ -24,16 +35,16 @@ export default function Callback() {
           navigate('/employee')
         }
       })
-      .catch(() => {
+      .catch((err) => {
         setError('Error al verificar la sesión. Intenta de nuevo.')
       })
   }, [loginWithToken, navigate])
 
   if (error) {
     return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4">
         <div className="text-center space-y-4">
-          <p className="text-red-600">{error}</p>
+          <p className="text-red-600 text-sm break-all">{error}</p>
           <a href="/" className="text-blue-600 underline text-sm">Volver al inicio</a>
         </div>
       </div>
