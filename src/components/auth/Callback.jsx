@@ -7,45 +7,45 @@ export default function Callback() {
   const { loginWithToken } = useAuth()
   const navigate = useNavigate()
   const [error, setError] = useState(null)
+  const [debug, setDebug] = useState(null)
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
-
-    // InsForge redirige con ?code=... o directamente con ?token=...
     const code = params.get('insforge_code') || params.get('code')
-    const token = params.get('token') || params.get('access_token')
     const state = params.get('state')
+    const token = params.get('token') || params.get('access_token')
+
+    // Guardar debug info
+    const allParams = [...params.entries()].map(([k,v]) => `${k}: ${v.slice(0,40)}`).join('\n')
+    setDebug(allParams)
 
     const handleLogin = async (insforgeToken) => {
       const userData = await loginWithToken(insforgeToken)
-      if (userData.role === 'ADMIN') {
-        navigate('/admin', { replace: true })
-      } else {
-        navigate('/employee', { replace: true })
-      }
+      if (userData.role === 'ADMIN') navigate('/admin', { replace: true })
+      else navigate('/employee', { replace: true })
     }
 
     if (token) {
-      // InsForge mandó el token directo
-      handleLogin(token).catch(() => setError('Error al verificar la sesión.'))
+      handleLogin(token).catch((e) => setError('Error login: ' + e?.response?.data?.error))
     } else if (code) {
-      // InsForge mandó un code — intercambiarlo en el backend
       exchangeCode(code, state)
         .then(res => handleLogin(res.data.token))
-        .catch(() => setError('Error al intercambiar el código de autenticación.'))
+        .catch((e) => {
+          const detail = e?.response?.data?.detail?.message || e?.response?.data?.error || e.message
+          setError('Exchange error: ' + detail)
+        })
     } else {
-      // Debug: mostrar todos los params
-      const allParams = [...params.entries()].map(([k,v]) => `${k}=${v.slice(0,30)}`).join(' | ')
-      setError(`Sin token ni code. Params: [${allParams || 'ninguno'}]`)
+      setError('Sin token ni code')
     }
   }, [loginWithToken, navigate])
 
   if (error) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4">
-        <div className="text-center space-y-4">
-          <p className="text-red-600 text-sm break-all">{error}</p>
-          <a href="/" className="text-blue-600 underline text-sm">Volver al inicio</a>
+        <div className="text-center space-y-4 max-w-sm">
+          <p className="text-red-600 text-sm font-mono">{error}</p>
+          {debug && <pre className="text-xs text-gray-500 text-left bg-gray-100 p-2 rounded">{debug}</pre>}
+          <a href="/" className="text-blue-600 underline text-sm block">Volver al inicio</a>
         </div>
       </div>
     )
