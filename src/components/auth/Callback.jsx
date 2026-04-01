@@ -15,10 +15,6 @@ export default function Callback() {
     const state = params.get('state')
     const token = params.get('token') || params.get('access_token')
 
-    // Guardar debug info
-    const allParams = [...params.entries()].map(([k,v]) => `${k}: ${v.slice(0,40)}`).join('\n')
-    setDebug(allParams)
-
     const handleLogin = async (insforgeToken) => {
       const userData = await loginWithToken(insforgeToken)
       if (userData.role === 'ADMIN') navigate('/admin', { replace: true })
@@ -31,20 +27,25 @@ export default function Callback() {
       exchangeCode(code, state)
         .then(res => handleLogin(res.data.token))
         .catch((e) => {
-          const detail = e?.response?.data?.detail?.message || e?.response?.data?.error || e.message
-          setError('Exchange error: ' + detail)
+          const respData = e?.response?.data
+          const detail = respData?.detail
+          const keys = respData?.keys
+          setError('Exchange error: ' + (respData?.error || e.message))
+          setDebug(JSON.stringify({ detail, keys }, null, 2))
         })
     } else {
+      const allParams = [...params.entries()].map(([k,v]) => `${k}: ${v.slice(0,40)}`).join('\n')
       setError('Sin token ni code')
+      setDebug(allParams)
     }
   }, [loginWithToken, navigate])
 
   if (error) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4">
-        <div className="text-center space-y-4 max-w-sm">
+        <div className="text-center space-y-4 max-w-sm w-full">
           <p className="text-red-600 text-sm font-mono">{error}</p>
-          {debug && <pre className="text-xs text-gray-500 text-left bg-gray-100 p-2 rounded">{debug}</pre>}
+          {debug && <pre className="text-xs text-gray-500 text-left bg-gray-100 p-2 rounded overflow-auto max-h-48">{debug}</pre>}
           <a href="/" className="text-blue-600 underline text-sm block">Volver al inicio</a>
         </div>
       </div>
