@@ -5,32 +5,47 @@ import { signToken } from '../utils/jwt.js';
 const INSFORGE_URL = process.env.INSFORGE_URL || 'https://9bc8pwrr.us-east.insforge.app';
 const INSFORGE_API_KEY = process.env.INSFORGE_API_KEY || 'ik_6fff462b006815d5836170080d3122c3';
 
-// GET /api/auth/oauth/google/url — llama a InsForge y devuelve la URL final de Google OAuth
+// Almacén temporal de codeVerifiers (en memoria, TTL 10 minutos)
+const codeVerifierStore = new Map();
+const CODE_VERIFIER_TTL = 10 * 60 * 1000;
+
+function storeCodeVerifier(codeChallenge, codeVerifier) {
+  codeVerifierStore.set(codeChallenge, { codeVerifier, expiresAt: Date.now() + CODE_VERIFIER_TTL });
+  // Limpiar entradas expiradas
+  for (const [k, v] of codeVerifierStore) {
+    if (v.expiresAt < Date.now()) codeVerifierStore.delete(k);
+  }
+}
+
+function getCodeVerifier(codeChallenge) {
+  const entry = codeVerifierStore.get(codeChallenge);
+  if (!entry || entry.expiresAt < Date.now()) return null;
+  codeVerifierStore.delete(codeChallenge);
+  return entry.codeVerifier;
+}
+
+// GET /api/auth/oauth/google/url
 export async function getGoogleOAuthUrl(req, res) {
   try {
     const redirectUri = process.env.FRONTEND_URL + '/auth/callback';
     const crypto = await import('crypto');
     const codeVerifier = crypto.randomBytes(48).toString('base64url');
     const codeChallenge = crypto.createHash('sha256').update(codeVerifier).digest('base64url');
-    const state = Buffer.from(JSON.stringify({ codeVerifier, ts: Date.now() })).toString('base64url');
 
-    const insforgeUrl = `${INSFORGE_URL}/api/auth/oauth/google?redirect_uri=${encodeURIComponent(redirectUri)}&code_challenge=${codeChallenge}&code_challenge_method=S256&state=${state}`;
+    // Guardar codeVerifier indexado por codeChallenge
+    storeCodeVerifier(codeChallenge, codeVerifier);
 
-    // Llamar a InsForge para obtener la authUrl final de Google
+    const insforgeUrl = `${INSFORGE_URL}/api/auth/oauth/google?redirect_uri=${encodeURIComponent(redirectUri)}&code_challenge=${codeChallenge}&code_challenge_method=S256&state=${codeChallenge}`;
+
     const insforgeRes = await fetch(insforgeUrl, {
       headers: { 'x-api-key': INSFORGE_API_KEY },
     });
 
-    if (!insforgeRes.ok) {
-      throw new Error(`InsForge responded with ${insforgeRes.status}`);
-    }
+    if (!insforgeRes.ok) throw new Error(`InsForge responded with ${insforgeRes.status}`);
 
     const data = await insforgeRes.json();
     const finalUrl = data.authUrl || data.url;
-
-    if (!finalUrl) {
-      throw new Error('InsForge did not return an auth URL');
-    }
+    if (!finalUrl) throw new Error('InsForge did not return an auth URL');
 
     return res.json({ url: finalUrl });
   } catch (error) {
@@ -39,7 +54,64 @@ export async function getGoogleOAuthUrl(req, res) {
   }
 }
 
-// POST /api/auth/verify — verifica token de InsForge, retorna JWT propio con rol
+// POST /api/auth/exchange — intercambia insforge_code por token propio
+export async function exchangeCode(req, res) {
+  try {
+    const { code } = req.body;
+    if (!code) return res.status(400).json({ error: 'code is required.' });
+
+    // Buscar todos los codeVerifiers disponibles e intentar con cada uno
+    // InsForge manda el codeChallenge en el state del callback
+    let codeVerifier = null;
+    
+    // Intentar obtener el state del request (si el frontend lo manda)
+    const { state } = req.body;
+    if (state) {
+      codeVerifier = getCodeVerifier(state);
+    }
+    
+    // Si no, tomar el primero disponible (solo hay uno activo a la vez por usuario)
+    if (!codeVerifier && codeVerifierStore.size > 0) {
+      const [firstKey, firstVal] = codeVerifierStore.entries().next().value;
+      codeVerifier = firstVal.codeVerifier;
+      codeVerifierStore.delete(firstKey);
+    }
+
+    if (!codeVerifier) {
+      return res.status(400).json({ error: 'Session expired. Please try logging in again.' });
+    }
+
+    // Exchange con InsForge
+    const exchangeRes = await fetch(`${INSFORGE_URL}/api/auth/oauth/exchange`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': INSFORGE_API_KEY,
+      },
+      body: JSON.stringify({ insforge_code: code, code, code_verifier: codeVerifier }),
+    });
+
+    if (!exchangeRes.ok) {
+      const errData = await exchangeRes.json().catch(() => ({}));
+      console.error('InsForge exchange error:', errData);
+      return res.status(401).json({ error: 'Failed to exchange code.', detail: errData });
+    }
+
+    const exchangeData = await exchangeRes.json();
+    const insforgeToken = exchangeData.access_token || exchangeData.token;
+    if (!insforgeToken) {
+      return res.status(401).json({ error: 'No token in exchange response.', detail: exchangeData });
+    }
+
+    req.body.token = insforgeToken;
+    return verifyInsforgeToken(req, res);
+  } catch (error) {
+    console.error('exchangeCode error:', error);
+    return res.status(500).json({ error: 'Error exchanging code.' });
+  }
+}
+
+// POST /api/auth/verify
 export async function verifyInsforgeToken(req, res) {
   try {
     const { token } = req.body;
@@ -52,13 +124,10 @@ export async function verifyInsforgeToken(req, res) {
       },
     });
 
-    if (!meRes.ok) {
-      return res.status(401).json({ error: 'Invalid InsForge token.' });
-    }
+    if (!meRes.ok) return res.status(401).json({ error: 'Invalid InsForge token.' });
 
     const meData = await meRes.json();
     const { id: insforgeId, email, name, avatarUrl: picture } = meData.user || meData;
-
     if (!email) return res.status(400).json({ error: 'Email not available.' });
 
     let { rows } = await pool.query('SELECT * FROM users WHERE insforge_id = $1 OR email = $2', [insforgeId, email]);
@@ -80,13 +149,10 @@ export async function verifyInsforgeToken(req, res) {
       user = updated.rows[0];
     }
 
-    if (!user.is_active) {
-      return res.status(403).json({ error: 'Your account has been deactivated. Contact an administrator.' });
-    }
+    if (!user.is_active) return res.status(403).json({ error: 'Account deactivated.' });
 
     const u = toRow(user);
     const jwtToken = signToken({ userId: u.id, email: u.email, name: u.name, role: u.role });
-
     return res.status(200).json({
       success: true,
       token: jwtToken,
@@ -112,54 +178,6 @@ export async function getMe(req, res) {
     return res.status(200).json({ success: true, user: u });
   } catch (error) {
     console.error('getMe error:', error);
-    return res.status(500).json({ error: 'An error occurred while fetching user info.' });
-  }
-}
-
-// POST /api/auth/exchange — intercambia el code de InsForge por token propio
-export async function exchangeCode(req, res) {
-  try {
-    const { code, state } = req.body;
-    if (!code) return res.status(400).json({ error: 'code is required.' });
-
-    // Extraer codeVerifier del state (base64url JSON con { codeVerifier, ts })
-    let codeVerifier = null;
-    if (state) {
-      try {
-        const decoded = JSON.parse(Buffer.from(state, 'base64url').toString());
-        codeVerifier = decoded.codeVerifier;
-      } catch {}
-    }
-
-    // Intentar exchange con InsForge
-    const exchangeRes = await fetch(`${INSFORGE_URL}/api/auth/oauth/exchange`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': INSFORGE_API_KEY,
-      },
-      body: JSON.stringify({ insforge_code: code, code, code_verifier: codeVerifier }),
-    });
-
-    if (!exchangeRes.ok) {
-      const errData = await exchangeRes.json().catch(() => ({}));
-      console.error('InsForge exchange error:', errData);
-      return res.status(401).json({ error: 'Failed to exchange code.', detail: errData });
-    }
-
-    const exchangeData = await exchangeRes.json();
-    // InsForge devuelve access_token o token
-    const insforgeToken = exchangeData.access_token || exchangeData.token;
-
-    if (!insforgeToken) {
-      return res.status(401).json({ error: 'No token in exchange response.', detail: exchangeData });
-    }
-
-    // Reusar verifyInsforgeToken para crear usuario y JWT propio
-    req.body.token = insforgeToken;
-    return verifyInsforgeToken(req, res);
-  } catch (error) {
-    console.error('exchangeCode error:', error);
-    return res.status(500).json({ error: 'Error exchanging code.' });
+    return res.status(500).json({ error: 'An error occurred.' });
   }
 }
