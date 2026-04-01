@@ -138,7 +138,7 @@ export async function exchangeCode(req, res) {
         'Content-Type': 'application/json',
         'x-api-key': INSFORGE_API_KEY,
       },
-      body: JSON.stringify({ code, code_verifier: codeVerifier }),
+      body: JSON.stringify({ insforge_code: code, code, code_verifier: codeVerifier }),
     });
 
     if (!exchangeRes.ok) {
