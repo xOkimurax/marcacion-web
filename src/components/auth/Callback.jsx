@@ -7,45 +7,43 @@ export default function Callback() {
   const { loginWithToken } = useAuth()
   const navigate = useNavigate()
   const [error, setError] = useState(null)
-  const [debug, setDebug] = useState(null)
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
     const code = params.get('insforge_code') || params.get('code')
-    const state = params.get('state')
     const token = params.get('token') || params.get('access_token')
+    const pkceToken = sessionStorage.getItem('pkceToken')
 
     const handleLogin = async (insforgeToken) => {
       const userData = await loginWithToken(insforgeToken)
+      sessionStorage.removeItem('pkceToken')
       if (userData.role === 'ADMIN') navigate('/admin', { replace: true })
       else navigate('/employee', { replace: true })
     }
 
     if (token) {
-      handleLogin(token).catch((e) => setError('Error login: ' + e?.response?.data?.error))
+      handleLogin(token).catch(() => setError('Error al verificar la sesión.'))
     } else if (code) {
-      exchangeCode(code, state)
+      if (!pkceToken) {
+        setError('Sesión expirada. Por favor intentá de nuevo.')
+        return
+      }
+      exchangeCode(code, pkceToken)
         .then(res => handleLogin(res.data.token))
         .catch((e) => {
-          const respData = e?.response?.data
-          const detail = respData?.detail
-          const keys = respData?.keys
-          setError('Exchange error: ' + (respData?.error || e.message))
-          setDebug(JSON.stringify({ detail, keys }, null, 2))
+          const detail = e?.response?.data?.detail?.message || e?.response?.data?.error || e.message
+          setError('Error al iniciar sesión: ' + detail)
         })
     } else {
-      const allParams = [...params.entries()].map(([k,v]) => `${k}: ${v.slice(0,40)}`).join('\n')
-      setError('Sin token ni code')
-      setDebug(allParams)
+      setError('No se recibió respuesta de Google.')
     }
   }, [loginWithToken, navigate])
 
   if (error) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4">
-        <div className="text-center space-y-4 max-w-sm w-full">
-          <p className="text-red-600 text-sm font-mono">{error}</p>
-          {debug && <pre className="text-xs text-gray-500 text-left bg-gray-100 p-2 rounded overflow-auto max-h-48">{debug}</pre>}
+        <div className="text-center space-y-4">
+          <p className="text-red-600 text-sm">{error}</p>
           <a href="/" className="text-blue-600 underline text-sm block">Volver al inicio</a>
         </div>
       </div>

@@ -79,5 +79,5 @@ export const exportReport = (params) =>
 export default api
 
 // Exchange InsForge code for token
-export const exchangeCode = (code, state) =>
-  api.post('/auth/exchange', { code, state })
+export const exchangeCode = (code, pkceToken) =>
+  api.post("/auth/exchange", { code, pkceToken })

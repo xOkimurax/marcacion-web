@@ -26,13 +26,15 @@ export function AuthProvider({ children }) {
     init()
   }, [])
 
-  // Redirige al usuario a InsForge OAuth
   const startOAuth = useCallback(async () => {
     const res = await getOAuthUrl()
-    window.location.href = res.data.authUrl || res.data.url
+    // Guardar pkceToken en sessionStorage para usarlo en el callback
+    if (res.data.pkceToken) {
+      sessionStorage.setItem('pkceToken', res.data.pkceToken)
+    }
+    window.location.href = res.data.url
   }, [])
 
-  // Llamado desde /auth/callback con el token de InsForge
   const loginWithToken = useCallback(async (insforgeToken) => {
     const res = await verifyToken(insforgeToken)
     const { token, user: userData } = res.data
@@ -45,6 +47,7 @@ export function AuthProvider({ children }) {
   const logout = useCallback(() => {
     localStorage.removeItem('token')
     localStorage.removeItem('user')
+    sessionStorage.removeItem('pkceToken')
     setUser(null)
   }, [])
 
