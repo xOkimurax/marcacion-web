@@ -12,7 +12,7 @@ export default function Callback() {
     const params = new URLSearchParams(window.location.search)
 
     // InsForge redirige con ?code=... o directamente con ?token=...
-    const code = params.get('code')
+    const code = params.get('insforge_code') || params.get('code')
     const token = params.get('token') || params.get('access_token')
     const state = params.get('state')
 
