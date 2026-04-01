@@ -100,7 +100,7 @@ export async function exchangeCode(req, res) {
     const exchangeData = await exchangeRes.json();
     const insforgeToken = exchangeData.access_token || exchangeData.token;
     if (!insforgeToken) {
-      return res.status(401).json({ error: 'No token in exchange response.', detail: exchangeData });
+      return res.status(401).json({ error: "No token in exchange response.", detail: exchangeData, keys: Object.keys(exchangeData) });
     }
 
     req.body.token = insforgeToken;
